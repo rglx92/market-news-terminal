@@ -1,0 +1,27 @@
+{
+  "SPCX": {
+    "sector": "space",
+    "competitors": ["RKLB"],
+    "sector_peers": ["RKLB", "ASTS", "PL", "LUNR"]
+  },
+  "RKLB": {
+    "sector": "space",
+    "competitors": ["SPCX"],
+    "sector_peers": ["SPCX", "ASTS", "PL", "LUNR"]
+  },
+  "ASTS": {
+    "sector": "space_communications",
+    "competitors": [],
+    "sector_peers": ["SPCX", "RKLB", "IRDM"]
+  },
+  "NVDA": {
+    "sector": "semiconductors",
+    "competitors": ["AMD"],
+    "sector_peers": ["AMD", "AVGO", "TSM", "SMH"]
+  },
+  "AMD": {
+    "sector": "semiconductors",
+    "competitors": ["NVDA"],
+    "sector_peers": ["NVDA", "AVGO", "TSM", "SMH"]
+  }
+}
