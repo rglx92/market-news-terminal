@@ -31,6 +31,7 @@ Horizon = Literal["intradía", "días", "semanas", "meses"]
 
 
 class NewsItem(BaseModel):
+    # ticker es el ticker primario atribuido después de depurar la noticia.
     ticker: str
     headline: str
     summary: str = ""
@@ -40,6 +41,13 @@ class NewsItem(BaseModel):
     provider: str
     category: str = "company"
     form_type: str | None = None
+
+    # Metadatos de precisión y auditoría.
+    requested_ticker: str | None = None
+    mentioned_tickers: list[str] = Field(default_factory=list)
+    relevance_score: int = Field(default=70, ge=0, le=100)
+    relevance_reason: str = ""
+    is_broad_article: bool = False
 
 
 class MarketSnapshot(BaseModel):
@@ -79,3 +87,4 @@ class ScoredAnalysis(BaseModel):
     company_snapshot: MarketSnapshot | None = None
     spy_snapshot: MarketSnapshot | None = None
     mode: Literal["ai", "rules"]
+    ai_error: str | None = None

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import html
 import json
+import os
+import sys
 from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 import pandas as pd
 import plotly.express as px
@@ -13,15 +19,15 @@ from dotenv import load_dotenv
 from analyzer import analyze_news
 from market_data import get_macro_context, get_snapshot
 from models import ScoredAnalysis
-from news_sources import fetch_news_for_ticker
+from news_sources import fetch_news_for_watchlist
 from outcomes import update_pending_outcomes
-from scoring import trade_quality_score
+from scoring import aggregate_spy_bias, macro_regime_score, trade_quality_score
 from storage import calibration_rows, recent_history, save_analysis
 
 
-load_dotenv()
-BASE_DIR = Path(__file__).parent
+load_dotenv(BASE_DIR / ".env")
 RELATIONSHIPS = json.loads((BASE_DIR / "relationships.json").read_text(encoding="utf-8"))
+MIN_CALIBRATION_SAMPLE = 20
 
 st.set_page_config(
     page_title="MNT · Market News Terminal",
@@ -533,6 +539,8 @@ def render_news_card(item: ScoredAnalysis) -> None:
             <span class="tiny-chip">{esc(analysis.event_type.replace('_', ' '))}</span>
             <span class="tiny-chip">{esc(analysis.horizon)}</span>
             <span class="tiny-chip">{esc(news.source or news.provider)}</span>
+            <span class="tiny-chip">{esc(item.mode.upper())}</span>
+            <span class="tiny-chip">REL {news.relevance_score}</span>
             <span class="tiny-chip">{esc(published)}</span>
           </div>
           <div class="news-headline">{esc(news.headline)}</div>
@@ -564,16 +572,18 @@ def render_news_card(item: ScoredAnalysis) -> None:
 def render_macro_cards(macro: dict) -> None:
     st.markdown('<div class="section-label">Market pulse</div>', unsafe_allow_html=True)
     cols = st.columns(6)
+    effect_multiplier = {"SPY": 12.0, "QQQ": 10.0, "IWM": 6.0, "VIX": -3.0, "US10Y": -2.0, "DXY": -2.0}
     for col, key in zip(cols, ["SPY", "QQQ", "IWM", "VIX", "US10Y", "DXY"]):
         snapshot = macro.get(key)
         price = "—" if snapshot is None or snapshot.price is None else f"{snapshot.price:,.2f}"
         change = None if snapshot is None else snapshot.change_1d_pct
+        risk_effect = None if change is None else change * effect_multiplier[key]
         with col:
             render_metric_card(
                 key,
                 price,
                 f"Sesión: {fmt_pct(change)}",
-                change,
+                risk_effect,
             )
 
 
@@ -680,19 +690,27 @@ with st.sidebar:
         height=118,
     )
     lookback_days = st.slider("Días de noticias", 1, 7, 2)
-    max_news = st.slider("Máximo por ticker", 1, 10, 4)
+    max_news = st.slider("Máximo por ticker atribuido", 1, 10, 4)
+    minimum_relevance = st.slider(
+        "Relevancia mínima de la noticia",
+        40,
+        100,
+        60,
+        help="Elimina listas generales, noticias duplicadas y artículos donde el ticker solo aparece de pasada.",
+    )
     minimum_quality = st.slider("Calidad mínima del trade", 0, 100, 35)
     run = st.button("✦ Analizar noticias", type="primary", use_container_width=True)
     calibrate = st.button("Actualizar resultados reales", use_container_width=True)
     st.divider()
+    openai_configured = bool(os.getenv("OPENAI_API_KEY", "").strip())
+    finnhub_configured = bool(os.getenv("FINNHUB_API_KEY", "").strip())
     st.caption(
-        "IA avanzada: `OPENAI_API_KEY` · Cobertura adicional: `FINNHUB_API_KEY` · "
-        "Sin claves funciona con SEC, yfinance y reglas locales."
+        f"OpenAI: {'configurado' if openai_configured else 'sin clave'} · "
+        f"Finnhub: {'configurado' if finnhub_configured else 'sin clave'} · "
+        "SEC y yfinance se usan como respaldo."
     )
 
 watchlist = list(dict.fromkeys(x.strip().upper() for x in watchlist_raw.split(",") if x.strip()))
-mode_label = "AI READY" if st.session_state.get("scored_items") else "STANDBY"
-render_header(len(watchlist), mode_label)
 
 if calibrate:
     with st.spinner("Calculando retornos posteriores aproximados..."):
@@ -704,59 +722,107 @@ if run:
     macro = get_macro_context()
     spy_snapshot = macro.get("SPY") or get_snapshot("SPY")
 
+    news_items = fetch_news_for_watchlist(
+        watchlist,
+        days=lookback_days,
+        max_per_ticker=max_news,
+        minimum_relevance=minimum_relevance,
+    )
     rows: list[dict] = []
     scored_items: list[ScoredAnalysis] = []
-    total = max(1, len(watchlist))
+    ai_errors: list[str] = []
+    snapshot_cache = {"SPY": spy_snapshot}
+    total = max(1, len(news_items))
 
-    for idx, ticker in enumerate(watchlist):
-        progress.progress(idx / total, text=f"Analizando {ticker}...")
-        company_snapshot = spy_snapshot if ticker == "SPY" else get_snapshot(ticker)
-        news_items = fetch_news_for_ticker(ticker, days=lookback_days)[:max_news]
-        for news in news_items:
-            analysis, mode = analyze_news(
-                news,
-                company_snapshot,
-                spy_snapshot,
-                macro,
-                RELATIONSHIPS,
-            )
-            trade_quality, confirmation = trade_quality_score(
-                analysis, company_snapshot, spy_snapshot
-            )
-            scored = ScoredAnalysis(
-                news=news,
-                analysis=analysis,
-                trade_quality=trade_quality,
-                market_confirmation=confirmation,
-                company_snapshot=company_snapshot,
-                spy_snapshot=spy_snapshot,
-                mode=mode,
-            )
-            save_analysis(scored)
-            scored_items.append(scored)
-            rows.append(
-                {
-                    "Hora": news.published_at,
-                    "Ticker": ticker,
-                    "Titular": news.headline,
-                    "Empresa": analysis.company_impact,
-                    "SPY": analysis.spy_impact,
-                    "Trade": trade_quality,
-                    "Confirmación": confirmation,
-                    "Confianza": analysis.confidence,
-                    "Fuente": news.source,
-                    "Modo": mode,
-                }
-            )
+    for idx, news in enumerate(news_items):
+        progress.progress(idx / total, text=f"Analizando {news.ticker}: {news.headline[:54]}...")
+        if news.ticker not in snapshot_cache:
+            snapshot_cache[news.ticker] = get_snapshot(news.ticker)
+        company_snapshot = snapshot_cache[news.ticker]
+        analysis, mode, ai_error = analyze_news(
+            news,
+            company_snapshot,
+            spy_snapshot,
+            macro,
+            RELATIONSHIPS,
+        )
+        if ai_error and ai_error not in ai_errors:
+            ai_errors.append(ai_error)
+        trade_quality, confirmation = trade_quality_score(
+            analysis,
+            company_snapshot,
+            spy_snapshot,
+            relevance_score=news.relevance_score,
+        )
+        scored = ScoredAnalysis(
+            news=news,
+            analysis=analysis,
+            trade_quality=trade_quality,
+            market_confirmation=confirmation,
+            company_snapshot=company_snapshot,
+            spy_snapshot=spy_snapshot,
+            mode=mode,
+            ai_error=ai_error,
+        )
+        save_analysis(scored)
+        scored_items.append(scored)
+        rows.append(
+            {
+                "Hora": news.published_at,
+                "Ticker": news.ticker,
+                "Origen": news.requested_ticker or news.ticker,
+                "Titular": news.headline,
+                "Empresa": analysis.company_impact,
+                "SPY": analysis.spy_impact,
+                "Trade": trade_quality,
+                "Confirmación": confirmation,
+                "Confianza": analysis.confidence,
+                "Relevancia": news.relevance_score,
+                "Fuente": news.source,
+                "Modo": mode.upper(),
+            }
+        )
 
     progress.progress(1.0, text="Análisis terminado.")
     st.session_state["scored_items"] = scored_items
     st.session_state["rows"] = rows
     st.session_state["macro"] = macro
+    st.session_state["ai_errors"] = ai_errors
 
 rows = st.session_state.get("rows", [])
 scored_items: list[ScoredAnalysis] = st.session_state.get("scored_items", [])
 macro = st.session_state.get("macro", {})
+ai_errors: list[str] = st.session_state.get("ai_errors", [])
+
+if scored_items:
+    ai_count = sum(item.mode == "ai" for item in scored_items)
+    if ai_count == len(scored_items):
+        mode_label = "AI ACTIVE"
+    elif ai_count:
+        mode_label = f"AI {ai_count}/{len(scored_items)}"
+    else:
+        mode_label = "RULES ONLY"
+else:
+    mode_label = "AI CONFIGURED" if openai_configured else "STANDBY"
+
+render_header(len(watchlist), mode_label)
+
+if scored_items:
+    ai_count = sum(item.mode == "ai" for item in scored_items)
+    rules_count = len(scored_items) - ai_count
+    st.caption(
+        f"Motor usado: {ai_count} análisis con IA · {rules_count} con reglas · "
+        f"{len(scored_items)} noticias únicas y relevantes."
+    )
+    if ai_errors:
+        with st.expander("Diagnóstico de IA"):
+            st.warning(
+                "Al menos una llamada a OpenAI falló y la app usó reglas locales para no detenerse. "
+                "Revisa el modelo, saldo/permisos de la API y la versión del paquete openai."
+            )
+            st.code("\n".join(ai_errors[:5]))
+            st.caption(f"Modelo configurado: {os.getenv('OPENAI_MODEL', 'gpt-5.6')}")
+
 
 if not rows:
     st.markdown('<div class="section-label">Centro de mando</div>', unsafe_allow_html=True)
@@ -788,14 +854,17 @@ else:
     filtered = df[df["Trade"] >= minimum_quality].sort_values(
         ["Trade", "Confianza"], ascending=False
     )
+    filtered_items = [item for item in scored_items if item.trade_quality >= minimum_quality]
+    spy_bias, spy_bias_confidence, macro_score, macro_evidence = aggregate_spy_bias(filtered_items, macro)
 
     if macro:
         render_macro_cards(macro)
 
     st.markdown('<div class="section-label">Resumen de señales</div>', unsafe_allow_html=True)
-    bullish = filtered.sort_values("Empresa", ascending=False).iloc[0] if not filtered.empty else None
-    bearish = filtered.sort_values("Empresa", ascending=True).iloc[0] if not filtered.empty else None
-    spy_bias = float(filtered["SPY"].mean()) if not filtered.empty else 0.0
+    bullish_pool = filtered[filtered["Empresa"] > 10]
+    bearish_pool = filtered[filtered["Empresa"] < -10]
+    bullish = bullish_pool.sort_values("Empresa", ascending=False).iloc[0] if not bullish_pool.empty else None
+    bearish = bearish_pool.sort_values("Empresa", ascending=True).iloc[0] if not bearish_pool.empty else None
     high_quality = int((filtered["Trade"] >= 70).sum()) if not filtered.empty else 0
 
     s1, s2, s3, s4 = st.columns(4)
@@ -814,7 +883,7 @@ else:
             None if bearish is None else float(bearish["Empresa"]),
         )
     with s3:
-        render_metric_card("Sesgo SPY", f"{spy_bias:+.1f}", "Promedio ponderable de noticias filtradas.", spy_bias)
+        render_metric_card("Sesgo SPY", f"{spy_bias:+.1f}", f"Macro {macro_score:+d} · confianza {spy_bias_confidence:.0f}%.", spy_bias)
     with s4:
         render_metric_card("Setups ≥ 70", str(high_quality), f"{len(filtered)} noticias superan el filtro actual.")
 
@@ -833,13 +902,14 @@ else:
                 top = filtered.head(8).copy()
                 top["Señal"] = top["Empresa"].apply(label_direction)
                 st.dataframe(
-                    top[["Ticker", "Señal", "Trade", "Confianza", "Titular"]],
+                    top[["Ticker", "Señal", "Trade", "Confianza", "Relevancia", "Modo", "Titular"]],
                     use_container_width=True,
                     hide_index=True,
                     height=485,
                     column_config={
                         "Trade": st.column_config.ProgressColumn(min_value=0, max_value=100),
                         "Confianza": st.column_config.ProgressColumn(min_value=0, max_value=100),
+                        "Relevancia": st.column_config.ProgressColumn(min_value=0, max_value=100),
                         "Titular": st.column_config.TextColumn(width="large"),
                     },
                 )
@@ -855,6 +925,7 @@ else:
                     "Trade": st.column_config.ProgressColumn(min_value=0, max_value=100),
                     "Confirmación": st.column_config.ProgressColumn(min_value=0, max_value=100),
                     "Confianza": st.column_config.ProgressColumn(min_value=0, max_value=100),
+                    "Relevancia": st.column_config.ProgressColumn(min_value=0, max_value=100),
                     "Hora": st.column_config.DatetimeColumn(format="MMM D, h:mm a"),
                     "Titular": st.column_config.TextColumn(width="large"),
                 },
@@ -894,19 +965,26 @@ else:
                 for point in a.evidence:
                     st.write(f"• {point}")
                 st.caption(
-                    f"Relación: {a.directness} · Modo: {item.mode} · "
+                    f"Relación: {a.directness} · Modo: {item.mode.upper()} · "
+                    f"Relevancia: {item.news.relevance_score}/100 · "
+                    f"Origen del feed: {item.news.requested_ticker or item.news.ticker} · "
                     f"Afectados: {', '.join(a.affected_tickers)}"
                 )
+                st.caption(f"Atribución: {item.news.relevance_reason}")
+                if item.ai_error:
+                    st.warning(f"Fallback de IA: {item.ai_error}")
                 if item.news.url:
                     st.link_button("Abrir fuente original ↗", item.news.url)
 
     with spy_tab:
         spy_news = filtered.copy()
-        avg_spy = float(spy_news["SPY"].mean()) if not spy_news.empty else 0.0
-        avg_conf = float(spy_news["Confianza"].mean()) if not spy_news.empty else 0.0
+        avg_spy = spy_bias
+        avg_conf = spy_bias_confidence
         left, right = st.columns([0.9, 1.1])
         with left:
             st.plotly_chart(spy_gauge(avg_spy, avg_conf), use_container_width=True)
+            regime_label = "RISK-ON" if macro_score > 15 else "RISK-OFF" if macro_score < -15 else "MIXED"
+            st.metric("Régimen macro", regime_label, f"{macro_score:+d}/100")
         with right:
             st.markdown('<div class="section-label">Catalizadores de mayor alcance</div>', unsafe_allow_html=True)
             top_spy = spy_news.reindex(spy_news["SPY"].abs().sort_values(ascending=False).index).head(8)
@@ -925,9 +1003,12 @@ else:
                     },
                 )
 
+        with st.expander("Evidencia del régimen macro"):
+            for point in macro_evidence:
+                st.write(f"• {point}")
         st.caption(
-            "El sesgo agregado resume las noticias filtradas; no sustituye la lectura del precio, "
-            "la amplitud, los rendimientos ni el posicionamiento de opciones."
+            "El sesgo combina el régimen de SPY, QQQ, IWM, VIX, bonos y dólar con noticias "
+            "ponderadas por relevancia, confianza y alcance. No constituye una predicción garantizada."
         )
 
     with history_tab:
@@ -966,11 +1047,24 @@ else:
                         else:
                             valid["Acierto"] = (valid["Impacto"] * valid[horizon]) > 0
                             accuracy = valid["Acierto"].mean() * 100
-                            st.metric(
-                                horizon.replace("Retorno ", "Dirección "),
-                                f"{accuracy:.1f}%",
-                                help=f"{len(valid)} observaciones con |impacto| ≥ 15.",
-                            )
+                            sample = len(valid)
+                            if sample < MIN_CALIBRATION_SAMPLE:
+                                st.metric(
+                                    horizon.replace("Retorno ", "Dirección "),
+                                    f"n={sample}",
+                                    delta="Muestra insuficiente",
+                                    delta_color="off",
+                                    help=(
+                                        f"Resultado provisional: {accuracy:.1f}% con {sample} observaciones. "
+                                        f"Se requieren al menos {MIN_CALIBRATION_SAMPLE} para mostrarlo como tasa."
+                                    ),
+                                )
+                            else:
+                                st.metric(
+                                    horizon.replace("Retorno ", "Dirección "),
+                                    f"{accuracy:.1f}%",
+                                    help=f"{sample} observaciones con |impacto| ≥ 15.",
+                                )
                 st.dataframe(eligible, use_container_width=True, hide_index=True)
             else:
                 st.info("Aún no hay suficientes observaciones con señal direccional.")

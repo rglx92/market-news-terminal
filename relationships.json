@@ -14,14 +14,44 @@
     "competitors": [],
     "sector_peers": ["SPCX", "RKLB", "IRDM"]
   },
+  "PL": {
+    "sector": "earth_observation",
+    "competitors": [],
+    "sector_peers": ["SPCX", "RKLB", "LUNR"]
+  },
+  "LUNR": {
+    "sector": "lunar_services",
+    "competitors": [],
+    "sector_peers": ["SPCX", "RKLB", "PL"]
+  },
   "NVDA": {
     "sector": "semiconductors",
     "competitors": ["AMD"],
-    "sector_peers": ["AMD", "AVGO", "TSM", "SMH"]
+    "sector_peers": ["AMD", "AVGO", "TSM", "MU", "SMH"]
   },
   "AMD": {
     "sector": "semiconductors",
     "competitors": ["NVDA"],
-    "sector_peers": ["NVDA", "AVGO", "TSM", "SMH"]
+    "sector_peers": ["NVDA", "AVGO", "TSM", "MU", "SMH"]
+  },
+  "MRVL": {
+    "sector": "semiconductors",
+    "competitors": ["AVGO"],
+    "sector_peers": ["NVDA", "AMD", "AVGO", "TSM", "MU"]
+  },
+  "AAPL": {
+    "sector": "megacap_technology",
+    "competitors": ["GOOGL", "MSFT"],
+    "sector_peers": ["MSFT", "GOOGL", "AMZN", "META", "NVDA"]
+  },
+  "MSFT": {
+    "sector": "megacap_technology",
+    "competitors": ["GOOGL", "AMZN"],
+    "sector_peers": ["AAPL", "GOOGL", "AMZN", "META", "NVDA"]
+  },
+  "GOOGL": {
+    "sector": "megacap_technology",
+    "competitors": ["MSFT", "META"],
+    "sector_peers": ["AAPL", "MSFT", "AMZN", "META", "NVDA"]
   }
 }

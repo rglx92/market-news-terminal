@@ -27,6 +27,7 @@ def calculate_outcome(ticker: str, published_at: str):
             auto_adjust=True,
             progress=False,
             threads=False,
+            timeout=8,
         )
     except Exception:
         return None

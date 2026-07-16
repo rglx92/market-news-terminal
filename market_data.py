@@ -38,6 +38,7 @@ def get_snapshot(ticker: str) -> MarketSnapshot:
             auto_adjust=True,
             progress=False,
             threads=False,
+            timeout=8,
         )
     except Exception:
         hist = pd.DataFrame()
